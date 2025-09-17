@@ -1,16 +1,61 @@
 package request
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
 	"slices"
-	"strings"
 )
 
 
+type RequestState int
+
+const (
+	RequestInitialized RequestState = 0;
+	RequestDone RequestState = 1;
+)
+
 type Request struct {
 	RequestLine RequestLine
+	State RequestState
+}
+
+func newRequest() *Request {
+	return &Request{
+		State: RequestInitialized,
+	}
+}
+
+func (r *Request) parse(data []byte) (int, error) {
+
+	read := 0
+	outer:
+	for {
+		switch r.State {
+		case RequestInitialized:
+			n, rl, err := parseRequestLine(data)
+			if err != nil {
+				return 0, err
+			}
+			if n == 0 {
+				break outer
+			}
+			read += n
+			r.RequestLine = *rl
+
+			r.State = RequestDone
+		case RequestDone:
+			break outer
+		}
+	}
+
+	return read, nil
+
+}
+
+func (r *Request) isDone() bool {
+	return r.State == RequestDone
 }
 
 type RequestLine struct {
@@ -29,51 +74,56 @@ func (r *RequestLine) Valid() bool {
 
 }
 
-const SEPERATOR = "\r\n"
+var SEPERATOR = []byte("\r\n")
 var BAD_FORMAT_ERROR = fmt.Errorf("malfored request line")
 
-func parseRequestLine(b string) (*RequestLine, error) {
-	idx := strings.Index(b, SEPERATOR)
+func parseRequestLine(b []byte) (int, *RequestLine, error) {
+	idx := bytes.Index(b, SEPERATOR)
 	if idx == -1 {
-		return nil, BAD_FORMAT_ERROR
+		return 0, nil, nil
 	}
 	startLine := b[:idx]
-	parts := strings.Split(startLine, " ")
+	parts := bytes.Split(startLine, []byte(" "))
 
 	if len(parts) != 3 {
-		return nil, BAD_FORMAT_ERROR
+		return 0, nil, BAD_FORMAT_ERROR
 	}
 
-	httpParts := strings.Split(parts[2], "/")
-	if len(httpParts) != 2 || httpParts[0] != "HTTP" {
-		return nil, BAD_FORMAT_ERROR
+	httpParts := bytes.Split(parts[2], []byte("/"))
+	if len(httpParts) != 2 || string(httpParts[0]) != "HTTP" {
+		return 0, nil, BAD_FORMAT_ERROR
 	}
 
 	r := &RequestLine{
-		Method: parts[0],
-		RequestTarget: parts[1],
-		HttpVersion: httpParts[1],
+		Method: string(parts[0]),
+		RequestTarget: string(parts[1]),
+		HttpVersion: string(httpParts[1]),
 	}
 	if !r.Valid() {
-		return nil, BAD_FORMAT_ERROR
+		return 0, nil, BAD_FORMAT_ERROR
 	}
-	return r, nil
+	return idx + len(SEPERATOR), r, nil
 }
 
 func RequestFromReader(reader io.Reader) (*Request, error) {
-	data, err := io.ReadAll(reader)
 
-	if err != nil {
-		return nil, fmt.Errorf("unable to io.ReadAl: %w", err)
+	request := newRequest()
+	buff := make([]byte, 1024)
+	nBuff:= 0
+
+	for !request.isDone(){
+		n, err := reader.Read(buff[nBuff:])
+		if err != nil {
+			return nil, err
+		}
+		nBuff += n
+		n, err = request.parse(buff[:nBuff])
+		// EOF is also an error we don't wanna break it since it expected
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		copy(buff, buff[n:nBuff])
+		nBuff -= n
 	}
-
-	str := string(data)
-	r, err := parseRequestLine(str)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Request{
-		RequestLine: *r,
-	}, nil
+	return request, nil
 }
